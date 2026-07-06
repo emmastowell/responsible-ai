@@ -32,6 +32,11 @@ Output tables: `cqc_latest_ratings` (raw), `cqc_parsed_documents` (parsed). PDFs
 
 Widgets: `catalog`, `schema`, `ratings_url`, `ratings_table`, `parsed_table`, `volume_dir`, `good_sample_size`, `candidate_limit` (set > 0 for a fast smoke test).
 
+### `notebooks/gdelt_events_ingestion.py`
+Builds the `gdelt_unrest_events` source table. Downloads GDELT 2.0 event export files (15-minute intervals) for a date range, filters to social-unrest CAMEO root codes (14 Protest, 17 Coerce, 18 Assault, 19 Fight), and optionally filters to UK geography. No authentication required. Run this **before** the extraction notebook below.
+
+Widgets: `catalog`, `schema`, `target_table`, `gdelt_date_from`, `gdelt_date_to`, `gdelt_filter_uk`, `max_files` (cap for a fast test).
+
 ### `notebooks/gdelt_article_raw_text_extraction.py`
 Reads unrest-related news events from `gdelt_unrest_events`, fetches each unique article URL, and extracts clean article body text with `trafilatura`. Writes `gdelt_article_raw_text`.
 
