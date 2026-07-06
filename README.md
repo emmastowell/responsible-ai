@@ -42,6 +42,12 @@ Reads unrest-related news events from `gdelt_unrest_events`, fetches each unique
 
 Configurable in-notebook: date window (default last 30 days), `max_unique_urls`, `batch_size`, and whether to store raw HTML.
 
+### `notebooks/crypto_archive_extraction.py`
+Extracts a crypto transaction-subgraph archive (a zip staged in the `crypto_raw` Volume) into a shared Volume for participants, then builds two Delta tables: `crypto_subgraph_summary` and `crypto_subgraph_manifest` (GraphML subgraphs plus LLM4TG text representations). Configurable in-notebook: `zip_path`, `extraction_root`, table names, `overwrite_extraction`.
+
+### `notebooks/synthetic_crypto_fraud_narratives.py`
+Generates a synthetic crypto transaction narratives dataset for pump-and-dump fraud-detection exercises. Writes `synthetic_crypto_fraud_narratives` with price/volume/wallet/social spike features (`price_change_pct`, `volume_spike_x`, `unique_buy_wallets`, `top10_holder_pct`, `social_mention_spike_x`), a free-text `narrative`, and a `label`.
+
 ## Serverless notes
 
 - Parse large `.ods` files with `python-calamine`, not `odfpy`. The serverless pandas is too old for `read_excel(engine="calamine")`, so call the native `CalamineWorkbook` API.
