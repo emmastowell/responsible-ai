@@ -52,6 +52,9 @@ Loads the FinancialPhraseBank dataset (Malo et al., 2014): ~4,840 financial-news
 
 Widgets: `catalog`, `schema`, `target_table`, `source_url`.
 
+### `notebooks/ons_economic_indicators_download.py`
+Downloads a reusable set of public UK Office for National Statistics economic indicators (CPIH inflation, labour market, monthly GDP, retail sales index) via the ONS beta dataset API. Social-unrest early-warning context. Loads each dataset into an `ons_<dataset>` table and builds a download manifest. Edit the `datasets` list in the config cell to change the indicator mix.
+
 ### `notebooks/crypto_archive_extraction.py`
 Extracts a crypto transaction-subgraph archive (a zip staged in the `crypto_raw` Volume) into a shared Volume for participants, then builds two Delta tables: `crypto_subgraph_summary` and `crypto_subgraph_manifest` (GraphML subgraphs plus LLM4TG text representations). Configurable in-notebook: `zip_path`, `extraction_root`, table names, `overwrite_extraction`.
 
