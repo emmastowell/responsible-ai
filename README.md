@@ -5,6 +5,9 @@ Materials for the databricks responsible AI hackathon
 
 All notebooks run on Databricks serverless and write to Unity Catalog (`hackathon.shared_datasets` by default). Open in the workspace and set the widgets, or run via `databricks jobs submit`.
 
+### `notebooks/hackathon_tutorial.py`
+Day-one worked example: **"Semantic Features in Statistical Workflows"**. Walks through the first two pipeline stages (ETL ingestion and semantic feature engineering) on the 20 Newsgroups corpus, using AI functions (`ai_mask`, `ai_summarize`) and framed around the ten UK Government AI Principles. A reference for team working time; no connection to the specific use cases, but the same unstructured-text problem.
+
 ### `notebooks/load_reddit_pushshift_corpora.py`
 Lands two Reddit corpora as bronze Delta tables from the [Arctic Shift](https://arctic-shift.photon-reddit.com) API (the maintained successor to the shut-down Pushshift API). Paginates backward over `created_utc` up to a configurable row cap.
 
