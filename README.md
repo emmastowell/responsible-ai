@@ -47,6 +47,11 @@ Daily OHLCV + volume for target equities (market-manipulation use case, pairs wi
 
 Widgets: `catalog`, `schema`, `target_table`, `tickers`, `date_from`, `date_to`, `interval` (`1d`/`1wk`/`1mo`).
 
+### `notebooks/financial_phrasebank_ingestion.py`
+Loads the FinancialPhraseBank dataset (Malo et al., 2014): ~4,840 financial-news sentences labelled positive / neutral / negative, at four annotator-agreement thresholds. Sentiment baseline for the fraud / market-manipulation use cases. Downloads the raw zip from Hugging Face and parses the latin-1 `sentence@label` files directly (avoids the `datasets` `trust_remote_code` path). Writes `financial_phrasebank` with an `agreement_level` column (~14.8k rows across the four levels).
+
+Widgets: `catalog`, `schema`, `target_table`, `source_url`.
+
 ### `notebooks/crypto_archive_extraction.py`
 Extracts a crypto transaction-subgraph archive (a zip staged in the `crypto_raw` Volume) into a shared Volume for participants, then builds two Delta tables: `crypto_subgraph_summary` and `crypto_subgraph_manifest` (GraphML subgraphs plus LLM4TG text representations). Configurable in-notebook: `zip_path`, `extraction_root`, table names, `overwrite_extraction`.
 
