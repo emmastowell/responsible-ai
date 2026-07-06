@@ -42,6 +42,11 @@ Reads unrest-related news events from `gdelt_unrest_events`, fetches each unique
 
 Configurable in-notebook: date window (default last 30 days), `max_unique_urls`, `batch_size`, and whether to store raw HTML.
 
+### `notebooks/yahoo_finance_prices_ingestion.py`
+Daily OHLCV + volume for target equities (market-manipulation use case, pairs with the WSB Reddit data). Defaults to the meme-stock set GME, AMC, BB, NOK, BBBY plus SPY/QQQ baselines, 2020-2021. Uses the Yahoo chart API directly (`query1.finance.yahoo.com/v8/finance/chart`) with a browser User-Agent — the default `python-requests` UA gets a 429. Writes `yahoo_finance_prices` (long format, partitioned by ticker).
+
+Widgets: `catalog`, `schema`, `target_table`, `tickers`, `date_from`, `date_to`, `interval` (`1d`/`1wk`/`1mo`).
+
 ### `notebooks/crypto_archive_extraction.py`
 Extracts a crypto transaction-subgraph archive (a zip staged in the `crypto_raw` Volume) into a shared Volume for participants, then builds two Delta tables: `crypto_subgraph_summary` and `crypto_subgraph_manifest` (GraphML subgraphs plus LLM4TG text representations). Configurable in-notebook: `zip_path`, `extraction_root`, table names, `overwrite_extraction`.
 
