@@ -1,79 +1,61 @@
-# responsible-ai
-Materials for the databricks responsible AI hackathon
+# Public Sector Responsible AI Hackathon
 
-## Notebooks
+Materials for a public sector Responsible AI hackathon run by **Databricks**, the **Royal Statistical Society (RSS) AI Task Force**, and **Manuka.AI**.
 
-All notebooks run on Databricks serverless and write to Unity Catalog (`hackathon.shared_datasets` by default). Open in the workspace and set the widgets, or run via `databricks jobs submit`.
+## Background
 
-### `notebooks/hackathon_tutorial.py`
-Day-one worked example: **"Semantic Features in Statistical Workflows"**. Walks through the first two pipeline stages (ETL ingestion and semantic feature engineering) on the 20 Newsgroups corpus, using AI functions (`ai_mask`, `ai_summarize`) and framed around the ten UK Government AI Principles. A reference for team working time; no connection to the specific use cases, but the same unstructured-text problem.
+This repository is the basis for a hands-on hackathon exploring the responsible use of AI in public sector statistical work. The premise is simple: the best way to understand where AI tools help, and where they fall short, is to experiment with them in low-risk settings that mirror real work before embedding them in live services.
 
-### `notebooks/load_reddit_pushshift_corpora.py`
-Lands two Reddit corpora as bronze Delta tables from the [Arctic Shift](https://arctic-shift.photon-reddit.com) API (the maintained successor to the shut-down Pushshift API). Paginates backward over `created_utc` up to a configurable row cap.
+The exercises are framed around the ten UK Government AI Principles (knowing what AI is and its limits, using it lawfully and securely, keeping meaningful human control, and so on). Every dataset here is public, so participants can experiment freely without touching sensitive or in-service data.
 
-| Corpus | Subreddits | Theme |
-|--------|-----------|-------|
-| `unrest` | r/PublicFreakout, r/protest, r/activism | Social unrest / historical social media text |
-| `wsb` | r/wallstreetbets | Financial market manipulation |
+The work is organised as a tutorial that teaches the core technique, followed by a set of real-world datasets that teams use for their own projects.
 
-Output tables: `reddit_{corpus}_{posts,comments}_bronze`. Run once with `content_type=posts` and once with `content_type=comments` to populate all four.
+## Start here: the tutorial
 
-Widgets: `catalog`, `schema`, `row_cap` (default 2000), `content_type` (`posts` or `comments`).
+**[`notebooks/hackathon_tutorial.py`](notebooks/hackathon_tutorial.py)** is the main notebook and the starting point for day one.
 
-### `notebooks/cqc_ratings_to_parsed_pipeline.py`
-End-to-end CQC (UK Care Quality Commission) pipeline in four stages:
+*Semantic Features in Statistical Workflows* is a worked example of the first two stages of a modelling pipeline: data ingestion and semantic feature engineering. It uses the 20 Newsgroups corpus (unstructured text, the same shape of problem the use cases present) and Databricks AI functions such as `ai_mask` and `ai_summarize`, with the UK Government AI Principles called out at each stage. Work through it first, then use it as a reference during team time.
 
-1. **Download ratings** — pull the CQC "Latest ratings" spreadsheet (.ods, ~310k rows) and land it raw in Delta. Parsed with `python-calamine` (~4s; the `odfpy` engine takes 10+ minutes on this file).
-2. **Build sample** — filter to Care Homes / "Safe" domain, keep all Requires-improvement / Inadequate / Outstanding, plus a hash-sampled slice of Good.
-3. **Download PDFs** — resolve each location's inspection-report PDF from the CQC site and save it to a UC Volume.
-4. **Parse** — run `ai_parse_document` over the downloaded PDFs into a Delta table.
+## Datasets for real-world practice
 
-Output tables: `cqc_latest_ratings` (raw), `cqc_parsed_documents` (parsed). PDFs land in the `cqc_reports` Volume.
+Each use case below has one or more notebooks that ingest public data into Unity Catalog (`hackathon.shared_datasets`), ready for teams to build on. Open a notebook in the workspace and set its widgets, or run it via `databricks jobs submit`.
 
-Widgets: `catalog`, `schema`, `ratings_url`, `ratings_table`, `parsed_table`, `volume_dir`, `good_sample_size`, `candidate_limit` (set > 0 for a fast smoke test).
+### Social unrest early warning
 
-### `notebooks/gdelt_events_ingestion.py`
-Builds the `gdelt_unrest_events` source table. Downloads GDELT 2.0 event export files (15-minute intervals) for a date range, filters to social-unrest CAMEO root codes (14 Protest, 17 Coerce, 18 Assault, 19 Fight), and optionally filters to UK geography. No authentication required. Run this **before** the extraction notebook below.
+| Notebook | What it builds |
+|----------|----------------|
+| [`gdelt_events_ingestion.py`](notebooks/gdelt_events_ingestion.py) | GDELT 2.0 news events filtered to unrest CAMEO codes (protest, coerce, assault, fight), optionally UK-only. Table: `gdelt_unrest_events`. |
+| [`gdelt_article_raw_text_extraction.py`](notebooks/gdelt_article_raw_text_extraction.py) | Fetches each event's article and extracts clean body text with `trafilatura`. Table: `gdelt_article_raw_text`. Run after the ingestion notebook. |
+| [`load_reddit_pushshift_corpora.py`](notebooks/load_reddit_pushshift_corpora.py) | Reddit unrest discussion (r/PublicFreakout, r/protest, r/activism) via the Arctic Shift API. Tables: `reddit_unrest_posts_bronze`, `reddit_unrest_comments_bronze`. |
+| [`ons_economic_indicators_download.py`](notebooks/ons_economic_indicators_download.py) | UK ONS indicators (CPIH inflation, labour market, monthly GDP, retail sales) via the ONS beta API, as contextual features. Tables: `ons_*`. |
 
-Widgets: `catalog`, `schema`, `target_table`, `gdelt_date_from`, `gdelt_date_to`, `gdelt_filter_uk`, `max_files` (cap for a fast test).
+### Market manipulation detection
 
-### `notebooks/gdelt_article_raw_text_extraction.py`
-Reads unrest-related news events from `gdelt_unrest_events`, fetches each unique article URL, and extracts clean article body text with `trafilatura`. Writes `gdelt_article_raw_text`.
+| Notebook | What it builds |
+|----------|----------------|
+| [`load_reddit_pushshift_corpora.py`](notebooks/load_reddit_pushshift_corpora.py) | r/WallStreetBets posts and comments via Arctic Shift. Tables: `reddit_wsb_posts_bronze`, `reddit_wsb_comments_bronze`. |
+| [`yahoo_finance_prices_ingestion.py`](notebooks/yahoo_finance_prices_ingestion.py) | Daily OHLCV and volume for target equities (meme-stock set plus SPY/QQQ baselines, 2020-2021) via the Yahoo chart API. Table: `yahoo_finance_prices`. |
+| [`financial_phrasebank_ingestion.py`](notebooks/financial_phrasebank_ingestion.py) | FinancialPhraseBank sentiment sentences (Malo et al., 2014) at four agreement levels, as a sentiment baseline. Table: `financial_phrasebank`. |
 
-Configurable in-notebook: date window (default last 30 days), `max_unique_urls`, `batch_size`, and whether to store raw HTML.
+### CQC inspection report analysis
 
-### `notebooks/yahoo_finance_prices_ingestion.py`
-Daily OHLCV + volume for target equities (market-manipulation use case, pairs with the WSB Reddit data). Defaults to the meme-stock set GME, AMC, BB, NOK, BBBY plus SPY/QQQ baselines, 2020-2021. Uses the Yahoo chart API directly (`query1.finance.yahoo.com/v8/finance/chart`) with a browser User-Agent — the default `python-requests` UA gets a 429. Writes `yahoo_finance_prices` (long format, partitioned by ticker).
+| Notebook | What it builds |
+|----------|----------------|
+| [`cqc_ratings_to_parsed_pipeline.py`](notebooks/cqc_ratings_to_parsed_pipeline.py) | End-to-end pipeline: download the CQC "Latest ratings" spreadsheet, sample Care Homes on the "Safe" domain, download their inspection PDFs, and structure them with `ai_parse_document`. Tables: `cqc_latest_ratings`, `cqc_parsed_documents`; PDFs land in the `cqc_reports` Volume. |
 
-Widgets: `catalog`, `schema`, `target_table`, `tickers`, `date_from`, `date_to`, `interval` (`1d`/`1wk`/`1mo`).
+### Financial and crypto fraud detection
 
-### `notebooks/financial_phrasebank_ingestion.py`
-Loads the FinancialPhraseBank dataset (Malo et al., 2014): ~4,840 financial-news sentences labelled positive / neutral / negative, at four annotator-agreement thresholds. Sentiment baseline for the fraud / market-manipulation use cases. Downloads the raw zip from Hugging Face and parses the latin-1 `sentence@label` files directly (avoids the `datasets` `trust_remote_code` path). Writes `financial_phrasebank` with an `agreement_level` column (~14.8k rows across the four levels).
+| Notebook | What it builds |
+|----------|----------------|
+| [`crypto_archive_extraction.py`](notebooks/crypto_archive_extraction.py) | Unpacks a crypto transaction-subgraph archive into a shared Volume and builds summary and manifest tables (GraphML subgraphs plus LLM4TG text representations). Tables: `crypto_subgraph_summary`, `crypto_subgraph_manifest`. |
+| [`synthetic_crypto_fraud_narratives.py`](notebooks/synthetic_crypto_fraud_narratives.py) | Generates a synthetic pump-and-dump dataset with price, volume, wallet and social-signal features plus a narrative and label. Table: `synthetic_crypto_fraud_narratives`. |
 
-Widgets: `catalog`, `schema`, `target_table`, `source_url`.
+### External dataset: IEEE-CIS Fraud Detection (Kaggle)
 
-### `notebooks/ons_economic_indicators_download.py`
-Downloads a reusable set of public UK Office for National Statistics economic indicators (CPIH inflation, labour market, monthly GDP, retail sales index) via the ONS beta dataset API. Social-unrest early-warning context. Loads each dataset into an `ons_<dataset>` table and builds a download manifest. Edit the `datasets` list in the config cell to change the indicator mix.
+Used for the financial fraud-detection use case. There is no notebook for it here because it requires Kaggle credentials and accepting the competition rules.
 
-### `notebooks/crypto_archive_extraction.py`
-Extracts a crypto transaction-subgraph archive (a zip staged in the `crypto_raw` Volume) into a shared Volume for participants, then builds two Delta tables: `crypto_subgraph_summary` and `crypto_subgraph_manifest` (GraphML subgraphs plus LLM4TG text representations). Configurable in-notebook: `zip_path`, `extraction_root`, table names, `overwrite_extraction`.
-
-### `notebooks/synthetic_crypto_fraud_narratives.py`
-Generates a synthetic crypto transaction narratives dataset for pump-and-dump fraud-detection exercises. Writes `synthetic_crypto_fraud_narratives` with price/volume/wallet/social spike features (`price_change_pct`, `volume_spike_x`, `unique_buy_wallets`, `top10_holder_pct`, `social_mention_spike_x`), a free-text `narrative`, and a `label`.
-
-## External datasets
-
-### IEEE-CIS Fraud Detection (Kaggle)
-Used for the financial fraud-detection use case. Not ingested by a notebook here because it requires Kaggle credentials and accepting the competition rules.
-
-- Dataset / download: https://www.kaggle.com/competitions/ieee-fraud-detection/data
+- Download: https://www.kaggle.com/competitions/ieee-fraud-detection/data
 - Accept the rules first: https://www.kaggle.com/competitions/ieee-fraud-detection/rules
-- API access needs a Kaggle token (username + key) from https://www.kaggle.com/settings > API.
+- API access needs a Kaggle token (username and key) from https://www.kaggle.com/settings > API
 
-Files: `train_transaction.csv`, `test_transaction.csv`, `train_identity.csv`, `test_identity.csv` (already loaded to `hackathon.shared_datasets` as the matching `train_*` / `test_*` tables).
-
-## Serverless notes
-
-- Parse large `.ods` files with `python-calamine`, not `odfpy`. The serverless pandas is too old for `read_excel(engine="calamine")`, so call the native `CalamineWorkbook` API.
-- Do not set `spark.sql.execution.arrow.pyspark.enabled` on serverless (managed by Spark Connect).
-- Delta needs `delta.columnMapping.mode = name` for column names with spaces or special characters (e.g. the raw CQC columns).
+The files (`train_transaction`, `test_transaction`, `train_identity`, `test_identity`) are already loaded to `hackathon.shared_datasets` as the matching `train_*` / `test_*` tables.
