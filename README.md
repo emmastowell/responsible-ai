@@ -16,6 +16,8 @@ The work is organised as a tutorial that teaches the core technique, followed by
 
 *Semantic Features in Statistical Workflows* is a worked example of the first two stages of a modelling pipeline: data ingestion and semantic feature engineering. It uses the 20 Newsgroups corpus (unstructured text, the same shape of problem the use cases present) and Databricks AI functions such as `ai_mask` and `ai_summarize`, with the UK Government AI Principles called out at each stage. Work through it first, then use it as a reference during team time.
 
+**[`notebooks/hackathon_vector_search.py`](notebooks/hackathon_vector_search.py)** is an optional companion notebook. It picks up from the tutorial's feature table and reuses the embeddings you already computed to build a Databricks Vector Search index, showing how semantic *retrieval* (similar-item lookup, free-text search, near-duplicate detection, few-shot label selection) complements the KMeans *clustering* in the main tutorial. Run the tutorial first with the same `USERNAME`.
+
 ## Datasets for real-world practice
 
 Each use case below has one or more notebooks that ingest public data into Unity Catalog (`hackathon.shared_datasets`), ready for teams to build on. Open a notebook in the workspace and set its widgets, or run it via `databricks jobs submit`.
