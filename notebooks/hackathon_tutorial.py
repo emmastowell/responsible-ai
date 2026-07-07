@@ -127,8 +127,8 @@ SAMPLE_SIZE = 200
 # ── MLflow experiment ─────────────────────────────────────────────────────────
 EXPERIMENT_NAME = f"/Users/{USERNAME}/hackathon_tutorial"
 
-print("UC target: %s.%s", UC_CATALOG, UC_SCHEMA)
-print("Sample size: %d articles", SAMPLE_SIZE)
+print(f"UC target: {UC_CATALOG}.{UC_SCHEMA}")
+print(f"Sample size: {SAMPLE_SIZE} articles")
 
 # COMMAND ----------
 
@@ -258,15 +258,150 @@ processed_df = (
     .filter(F.col("word_count")>30)
 )
 
-print(processed_df.count())
+print(f"Rows after cleaning: {processed_df.count()}")
 display(processed_df.limit(10))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC **Getting a feel for tooling costs**
+# MAGIC ### Cap the working set before paying for LLM calls
 # MAGIC
-# MAGIC If you look next to where it says Table above, you will see a + icon.  Click that, then select "Data Profile".  This will give a basic overview of your dataset, including summaries of missingness by field, most common values, and so on.  You will notice that there is no missing data for topic, subject or text, but distribution is 80% missing, and thus is not likely to be a very useful field for inference.  You can also see that the average subject field has 36.4 characters, and the average text field has 2,321.8 characters.  A common rule of thumb for English text is that it is roughly 4 characters per token, so this means that passing the full text field in will be on average 580 input tokens/ line.  This table has 1424 lines, this will give about 826,561 tokens per LLM function call, with most models charging per 1M input tokens.  There will be additional input tokens associated to the prompt that is passed in addition to the injected text.  Because this wll be the same for all lines, it is useful to use a system that caches the common part of the prompt.  This improves speed and in some cases reduces costs.  Databricks AI functions automatically cache common initial prompt components and some Databricks served models provide reduced rate for reads of cached tokens.
+# MAGIC Every downstream step in this notebook — `ai_mask`, `ai_summarize`, the embedding
+# MAGIC call and the two `ai_query` classifications — sends text to a model and is billed by
+# MAGIC the token. That means **cost scales directly with the number of rows.** Before running
+# MAGIC any of them, we cap the dataset to `SAMPLE_SIZE` rows (set in the config cell at the
+# MAGIC top). Work out your approach and validate quality on this small, cheap sample first;
+# MAGIC only scale up once you are happy. This is Principle 2 (use AI responsibly and keep
+# MAGIC costs down) and Principle 4 (meaningful human control early) in practice.
+
+# COMMAND ----------
+
+# DBTITLE 1,Cap to SAMPLE_SIZE before any paid LLM calls
+# limit() gives an exact, cheap cap; ordering first makes the sample reproducible across runs.
+full_row_count = processed_df.count()
+processed_df = processed_df.orderBy("article_id").limit(SAMPLE_SIZE)
+print(f"Working on {processed_df.count()} of {full_row_count} rows (SAMPLE_SIZE={SAMPLE_SIZE}).")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Getting a feel for tooling costs
+# MAGIC
+# MAGIC Before spending anything, get a feel for the shape of your data. Next to where it says
+# MAGIC **Table** in a display above, click the **+** icon and select **Data Profile**. This
+# MAGIC gives summaries of missingness, most common values, and average field lengths. You will
+# MAGIC notice, for example, that `distribution` is ~80% missing (so unlikely to be a useful
+# MAGIC feature), while `topic`, `subject` and `text` are complete.
+# MAGIC
+# MAGIC A common rule of thumb for English text is **~4 characters per token**. The next cell
+# MAGIC turns that into a rough-order-of-magnitude (ROM) cost estimate. The key points it makes:
+# MAGIC
+# MAGIC - Cost is driven by **tokens × passes × rate**. This notebook makes *several* LLM passes
+# MAGIC   over the data (two `ai_mask` calls, `ai_summarize`, an embedding, and `ai_query` for
+# MAGIC   tension and car extraction), so you multiply, not add once.
+# MAGIC - **Output tokens** cost money too, and are often priced higher than input tokens.
+# MAGIC - **Prompt caching** reduces the input cost of the shared prompt prefix. Databricks AI
+# MAGIC   Functions cache the common prefix automatically, and some served models bill cached
+# MAGIC   reads at a reduced rate — so the ROM figure is an upper bound on the input side.
+
+# COMMAND ----------
+
+# DBTITLE 1,Rough-order-of-magnitude (ROM) cost estimate
+# Rule of thumb: ~4 characters per token for English text.
+CHARS_PER_TOKEN = 4
+
+# $ per 1M tokens. THESE ARE PLACEHOLDERS — set them from the current Databricks pricing
+# page for your chosen model, or derive them from system.billing.list_prices (next section).
+# Foundation Model APIs are billed in DBUs; convert the DBU price to $ via list_prices.
+RATE_PER_M_INPUT = 0.50    # $/1M input tokens
+RATE_PER_M_OUTPUT = 1.50   # $/1M output tokens
+
+avg_text_chars = processed_df.agg(F.avg("char_count")).collect()[0][0] or 0
+avg_subject_chars = processed_df.agg(F.avg(F.length("subject"))).collect()[0][0] or 0
+sample_rows = processed_df.count()
+
+text_tokens_in = avg_text_chars / CHARS_PER_TOKEN
+subject_tokens_in = avg_subject_chars / CHARS_PER_TOKEN
+
+# Every LLM pass this notebook makes, with rough input/output tokens PER ROW.
+# Output sizes are estimates — a summary or JSON blob is far smaller than the input, but not free.
+passes = [
+    # name,                    input_tokens_per_row,     output_tokens_per_row
+    ("ai_mask (text)",         text_tokens_in,           text_tokens_in),   # returns masked text ~ same size
+    ("ai_mask (subject)",      subject_tokens_in,        subject_tokens_in),
+    ("ai_summarize",           text_tokens_in,           60),               # ~50-word summary
+    ("embedding (summary)",    60,                       0),                # embeddings billed on input only
+    ("ai_query tension",       text_tokens_in + 120,     40),               # + prompt, small JSON out
+    ("ai_query car (subset)",  text_tokens_in + 300,     80),               # rec.autos only, so over-counts here
+]
+
+print(f"{'pass':<24}{'in tok/row':>12}{'out tok/row':>13}")
+total_in = total_out = 0.0
+for name, tin, tout in passes:
+    total_in += tin
+    total_out += tout
+    print(f"{name:<24}{tin:>12,.0f}{tout:>13,.0f}")
+
+def rom_cost(rows):
+    c_in = rows * total_in / 1e6 * RATE_PER_M_INPUT
+    c_out = rows * total_out / 1e6 * RATE_PER_M_OUTPUT
+    return c_in + c_out
+
+print(f"\nPer row: {total_in:,.0f} input + {total_out:,.0f} output tokens across all passes")
+print(f"Est. cost on sample     ({sample_rows} rows): ${rom_cost(sample_rows):,.4f}")
+print(f"Est. cost on full corpus ({full_row_count} rows): ${rom_cost(full_row_count):,.2f}")
+print("\nROM figures only. Prompt caching and cached-token discounts reduce the input side.")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Measuring what a run *actually* cost, with system tables
+# MAGIC
+# MAGIC The estimate above is a planning tool. To see what a run really cost, query the billing
+# MAGIC **system tables** after it finishes. `system.billing.usage` records every billable event;
+# MAGIC `system.billing.list_prices` gives the price per unit so you can turn DBUs into dollars.
+# MAGIC
+# MAGIC Foundation Model API / Model Serving and AI Functions usage appear under
+# MAGIC `billing_origin_product` values `MODEL_SERVING` and `AI_FUNCTIONS`; the specific function
+# MAGIC is in `product_features.ai_functions.ai_function` and the endpoint in
+# MAGIC `usage_metadata.endpoint_name`. **Caveat:** these records land with a few hours' latency,
+# MAGIC so run the next cell later, not immediately after the cells above. This is the audit and
+# MAGIC lifecycle-monitoring evidence called for by Principles 5 and 10.
+
+# COMMAND ----------
+
+# DBTITLE 1,Actual $ cost of recent AI usage (run a few hours after your test run)
+spark.sql("""
+WITH ai_usage AS (
+  SELECT
+    u.sku_name,
+    u.billing_origin_product,
+    u.usage_metadata.endpoint_name                 AS endpoint_name,
+    u.product_features.ai_functions.ai_function    AS ai_function,
+    u.usage_unit,
+    SUM(u.usage_quantity)                          AS usage_quantity
+  FROM system.billing.usage u
+  WHERE u.billing_origin_product IN ('MODEL_SERVING', 'AI_FUNCTIONS')
+    AND u.usage_date >= current_date() - INTERVAL 2 DAYS
+    -- Optional: narrow to this notebook only
+    -- AND u.usage_metadata.notebook_path = '<your notebook path>'
+  GROUP BY ALL
+)
+SELECT
+  a.billing_origin_product,
+  a.endpoint_name,
+  a.ai_function,
+  a.sku_name,
+  a.usage_unit,
+  a.usage_quantity,
+  p.pricing.effective_list.default                                 AS unit_price_usd,
+  ROUND(a.usage_quantity * p.pricing.effective_list.default, 4)    AS est_cost_usd
+FROM ai_usage a
+LEFT JOIN system.billing.list_prices p
+  ON a.sku_name = p.sku_name
+  AND p.price_end_time IS NULL          -- current price
+ORDER BY est_cost_usd DESC
+""").display()
 
 # COMMAND ----------
 
@@ -316,6 +451,51 @@ display(redacted_df)
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ### Masking strategies: who sees the raw data, and when?
+# MAGIC
+# MAGIC We redacted PII **in memory, before the first table write** — so raw personal data never
+# MAGIC lands in a governed table. That is one valid strategy, but not the only one. Which you
+# MAGIC choose depends on your risk level and on who genuinely needs access to the raw data.
+# MAGIC
+# MAGIC | Strategy | How it works | Trade-off | Who can see raw |
+# MAGIC |---|---|---|---|
+# MAGIC | **A. Redact at source** (this notebook) | Mask before writing any table; raw never persists | Simplest and safest, but you cannot re-derive if masking was too aggressive | Only the ingest job / its owner |
+# MAGIC | **B. Tiered medallion** | Bronze = raw (locked down), Silver = masked, Gold = aggregated | Raw stays available for re-processing, but Bronze must be locked down hard | A small DE / DPO group, on Bronze only |
+# MAGIC | **C. Dynamic masking** | One table; Unity Catalog **column masks** + **row filters** reveal raw only to a privileged group | Flexible, single source of truth, but needs careful group management | Members of a privileged UC group |
+# MAGIC
+# MAGIC **Persona guidance.** Raw PII should reach only a Data Protection / data-engineering group.
+# MAGIC Model builders and analysts should work from the masked Silver layer; business users should
+# MAGIC only ever see aggregated Gold outputs or a dashboard. Note that `ai_mask` **itself** sends
+# MAGIC raw text to the model endpoint, so the masking step must run under the privileged persona —
+# MAGIC masking is a way to avoid *persisting or exposing* raw data, not a way to avoid *processing*
+# MAGIC it. (Principles 2, 3 and 4.)
+
+# COMMAND ----------
+
+# DBTITLE 1,Strategy C illustration: a Unity Catalog column mask (read-only, not executed)
+# This shows how you would expose one table to two personas. It needs a real UC group,
+# so it is left here as a string to read rather than run.
+COLUMN_MASK_EXAMPLE = """
+-- 1. A mask function: the privileged group sees the value, everyone else a placeholder.
+CREATE OR REPLACE FUNCTION hackathon.default.mask_pii(val STRING)
+RETURN CASE
+  WHEN is_account_group_member('data_protection_officers') THEN val
+  ELSE '[REDACTED]'
+END;
+
+-- 2. Apply it to a column holding raw text on the (locked-down) raw table.
+ALTER TABLE hackathon.default.raw_posts
+  ALTER COLUMN text SET MASK hackathon.default.mask_pii;
+
+-- 3. Optionally, a ROW FILTER to hide whole rows from non-privileged users:
+--    CREATE FUNCTION ... RETURN is_account_group_member(...);
+--    ALTER TABLE ... SET ROW FILTER ...;
+"""
+print(COLUMN_MASK_EXAMPLE)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ### Add metadata
 
 # COMMAND ----------
@@ -327,7 +507,7 @@ def field(name, dtype, comment):
 
 raw_schema = StructType([
     field("article_id",        StringType(),  "Unique identifier from the source dataset"),
-    field("topic",          StringType(),  "Newsgroup topic label (filtered to sci.med)"),
+    field("topic",          StringType(),  "Newsgroup topic label (filtered to talk.religion.misc, rec.autos, sci.space)"),
     field("subject",           StringType(),  "Subject line of the original post with emails and names redacted"),
     field("organization",      StringType(),  "Organization header, self-reported by the poster"),
     field("lines_header",      StringType(),  "Line count as given by the header"),
@@ -353,7 +533,7 @@ processed_df_with_comments = spark.createDataFrame(redacted_df.rdd, schema=raw_s
 # DBTITLE 1,Define table metadata including data provenance
 spark.sql(f"""
     COMMENT ON TABLE {PROCESSED_TABLE} IS
-    'Data is from religion newsgroup posts from the news20 public training dataset of newsgroup posts available at https://www.cs.cmu.edu/afs/cs.cmu.edu/project/theo-20/www/data/news20.html.  Names and email addresses have been redacted using ai_mask function.'
+    'Posts from three newsgroups (talk.religion.misc, rec.autos, sci.space) from the news20 public training dataset of newsgroup posts, available at https://www.cs.cmu.edu/afs/cs.cmu.edu/project/theo-20/www/data/news20.html.  Names and email addresses have been redacted using the ai_mask function and regex.'
 """)
 
 # COMMAND ----------
@@ -382,7 +562,7 @@ spark.sql(f"""
 # COMMAND ----------
 
 # DBTITLE 1,read back in from table
-text_dataset = spark.table('hackathon.default.tutorial_sci_med_posts_tutorial')
+text_dataset = spark.table(PROCESSED_TABLE)
 
 # COMMAND ----------
 
@@ -744,6 +924,57 @@ rec_autos_df = feature_table.filter(F.col('topic')=='rec.autos')
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC #### Old-school NLP vs `ai_query`: use both
+# MAGIC
+# MAGIC Entity extraction is a great illustration of **Principle 6 (the right tool for the job)**.
+# MAGIC You do not have to choose between regex / dictionary methods and LLMs — the strongest
+# MAGIC pipelines combine them:
+# MAGIC
+# MAGIC - **Car *makes* are a closed, known set.** A dictionary / gazetteer lookup (the next cell)
+# MAGIC   is free, deterministic, reproducible and fully auditable — properties that matter a lot
+# MAGIC   for official statistics, where you must be able to explain and repeat a result exactly.
+# MAGIC - **Car *models*, slang and typos are open-ended and context-dependent**
+# MAGIC   (`Bimmer`→BMW, `Vette`→Corvette, `Ponitac`→Pontiac). This fuzzy, judgement-heavy
+# MAGIC   resolution is exactly what an LLM is good at and what regex is bad at.
+# MAGIC
+# MAGIC So a good design is **hybrid**: cheap deterministic methods for the easy, enumerable cases,
+# MAGIC and `ai_query` only for the hard residual — or LLM for recall, then a gazetteer to validate
+# MAGIC for precision. (We already did this in the redaction step: regex for emails/phones +
+# MAGIC `ai_mask` for names.) Remember too that `ai_query` is **stochastic** and model versions
+# MAGIC change over time, so its outputs need the ongoing monitoring called for by Principles 2 and
+# MAGIC 5 — a gazetteer does not.
+# MAGIC
+# MAGIC Below we first run a pure-gazetteer pass (cheap, deterministic), then the `ai_query` pass,
+# MAGIC which picks up the fuzzy cases the gazetteer misses.
+
+# COMMAND ----------
+
+# DBTITLE 1,Deterministic baseline: a gazetteer of known makes (no LLM, no cost)
+KNOWN_MAKES = [
+    "Ford", "Toyota", "Honda", "Chevrolet", "Nissan", "Volkswagen", "BMW",
+    "Mercedes-Benz", "Mazda", "Subaru", "Mitsubishi", "Pontiac", "Oldsmobile",
+    "Chrysler", "Dodge", "Audi", "Volvo", "Saab", "Porsche", "Jaguar",
+]
+
+# Case-insensitive, word-boundary match for each make; keep the ones that hit.
+make_hits = F.array_distinct(F.array_remove(F.array(*[
+    F.when(F.col("text").rlike(r"(?i)\b" + re.escape(m) + r"\b"), F.lit(m)).otherwise(F.lit(None))
+    for m in KNOWN_MAKES
+]), None))
+
+gazetteer_df = rec_autos_df.withColumn("makes_gazetteer", make_hits)
+display(gazetteer_df.select("article_id", "makes_gazetteer"))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The gazetteer is instant and costs nothing, but it only finds makes we listed and cannot
+# MAGIC resolve slang, typos, or model-only mentions (`Civic` with no `Honda`). That residual is
+# MAGIC where the `ai_query` pass below earns its cost.
+
+# COMMAND ----------
+
 CAR_EXTRACTION_PROMPT = (
     "Read this Usenet post about cars, including any quoted text from earlier messages. "
     "Extract a list of: makes_and_models: any car manufacturer or model name mentioned, anywhere in the text "
@@ -800,7 +1031,7 @@ display(
     unpacked_car_df
     .select('article_id', F.explode("makes_and_models").alias("make_or_model"))
     .withColumn('make', 
-                F.when(F.lower(F.col("make_or_model")).contains('alpha romeo'),'Alpha Romeo')
+                F.when(F.lower(F.col("make_or_model")).contains('alfa romeo'),'Alfa Romeo')
                 .when(F.lower(F.col("make_or_model")).contains('t-bird'),'Ford')
                 .when(F.lower(F.col("make_or_model")).contains('thunderbird'),'Ford')
                 .when(F.lower(F.col("make_or_model")).contains('vw'),'Volkswagen')
@@ -808,7 +1039,7 @@ display(
                 .when(F.lower(F.col("make_or_model")).contains('sho'),'Ford')
                 .when(F.lower(F.col("make_or_model")).contains('240sx'),'Nissan')
                 .when(F.lower(F.col("make_or_model")).contains('olds'),'Oldsmobile')
-                .when(F.lower(F.col("make_or_model"))=='lh','Chrystler')
+                .when(F.lower(F.col("make_or_model"))=='lh','Chrysler')
                 .otherwise(F.split(F.col("make_or_model"),' ')[0]))
     .groupBy("make")
     .count()
@@ -821,7 +1052,7 @@ display(
 car_mentions = (unpacked_car_df
     .select('article_id', F.explode("makes_and_models").alias("make_or_model"))
     .withColumn('make', 
-                F.when(F.lower(F.col("make_or_model")).contains('alpha romeo'),'Alpha Romeo')
+                F.when(F.lower(F.col("make_or_model")).contains('alfa romeo'),'Alfa Romeo')
                 .when(F.lower(F.col("make_or_model")).contains('t-bird'),'Ford')
                 .when(F.lower(F.col("make_or_model")).contains('thunderbird'),'Ford')
                 .when(F.lower(F.col("make_or_model")).contains('vw'),'Volkswagen')
@@ -829,7 +1060,7 @@ car_mentions = (unpacked_car_df
                 .when(F.lower(F.col("make_or_model")).contains('sho'),'Ford')
                 .when(F.lower(F.col("make_or_model")).contains('240sx'),'Nissan')
                 .when(F.lower(F.col("make_or_model")).contains('olds'),'Oldsmobile')
-                .when(F.lower(F.col("make_or_model"))=='lh','Chrystler')
+                .when(F.lower(F.col("make_or_model"))=='lh','Chrysler')
                 .otherwise(F.split(F.col("make_or_model"),' ')[0]))
     .groupBy('article_id')
     .agg(
@@ -860,8 +1091,9 @@ display(auto_post_features)
 # COMMAND ----------
 
 # DBTITLE 1,checkpoint
-auto_post_features.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable("hackathon.default.auto_post_features_raw")
-auto_post_features = spark.table("hackathon.default.auto_post_features_raw")
+AUTO_POST_FEATURES_RAW_TABLE = f"{UC_CATALOG}.{UC_SCHEMA}.tutorial_auto_post_features_raw_{USERNAME}"
+auto_post_features.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(AUTO_POST_FEATURES_RAW_TABLE)
+auto_post_features = spark.table(AUTO_POST_FEATURES_RAW_TABLE)
 
 # COMMAND ----------
 
