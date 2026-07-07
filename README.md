@@ -61,6 +61,17 @@ Extracts a crypto transaction-subgraph archive (a zip staged in the `crypto_raw`
 ### `notebooks/synthetic_crypto_fraud_narratives.py`
 Generates a synthetic crypto transaction narratives dataset for pump-and-dump fraud-detection exercises. Writes `synthetic_crypto_fraud_narratives` with price/volume/wallet/social spike features (`price_change_pct`, `volume_spike_x`, `unique_buy_wallets`, `top10_holder_pct`, `social_mention_spike_x`), a free-text `narrative`, and a `label`.
 
+## External datasets
+
+### IEEE-CIS Fraud Detection (Kaggle)
+Used for the financial fraud-detection use case. Not ingested by a notebook here because it requires Kaggle credentials and accepting the competition rules.
+
+- Dataset / download: https://www.kaggle.com/competitions/ieee-fraud-detection/data
+- Accept the rules first: https://www.kaggle.com/competitions/ieee-fraud-detection/rules
+- API access needs a Kaggle token (username + key) from https://www.kaggle.com/settings > API.
+
+Files: `train_transaction.csv`, `test_transaction.csv`, `train_identity.csv`, `test_identity.csv` (already loaded to `hackathon.shared_datasets` as the matching `train_*` / `test_*` tables).
+
 ## Serverless notes
 
 - Parse large `.ods` files with `python-calamine`, not `odfpy`. The serverless pandas is too old for `read_excel(engine="calamine")`, so call the native `CalamineWorkbook` API.
