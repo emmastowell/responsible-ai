@@ -21,26 +21,22 @@
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## ⚠️ How this notebook is meant to be used — read first
+# MAGIC ## How this notebook is meant to be used — read first
 # MAGIC
 # MAGIC A Vector Search **endpoint** is persistent, always-on compute, and an **index** is a
-# MAGIC shared governed asset. The cost is modest, but there is little point in every attendee
-# MAGIC standing up their own copy just to query the same data — treat this infrastructure as
-# MAGIC **cattle, not pets**: provision it once, share it, and tear it down when the work is
-# MAGIC done. So this notebook has **two roles**, selected by the `role` widget at the top:
+# MAGIC shared governed asset. There is little point in every attendee standing up their own
+# MAGIC copy just to query the same data, so the endpoint, index and source table have been
+# MAGIC **provisioned once and shared** for the whole room. That keeps cost down — one
+# MAGIC always-on endpoint instead of dozens — and means everyone queries the same governed
+# MAGIC asset.
 # MAGIC
-# MAGIC | Role | Who | What runs | Creates infra? |
-# MAGIC |------|-----|-----------|----------------|
-# MAGIC | **`admin`** | One organiser, **once**, before the session | The *Admin setup* section: builds the shared source table, endpoint and index | **Yes** |
-# MAGIC | **`attendee`** | Everyone, any number of times | Everything else: connects to the **existing shared index** and queries it | **No** |
-# MAGIC
-# MAGIC **The notebook is idempotent.** Running it as `attendee` is entirely **read-only** —
-# MAGIC it creates nothing, deletes nothing, and can be run concurrently by many people
-# MAGIC against the one shared index. The `admin` setup and teardown cells are guarded by
-# MAGIC `if IS_ADMIN:` so attendees can safely *Run All* without provisioning anything.
-# MAGIC The endpoint, index and source-table names below are **shared** (no per-user suffix)
-# MAGIC precisely so that everyone points at the same asset. (Principles 2 cost, 5 lifecycle,
-# MAGIC 7 shared governed assets, 10 governance.)
+# MAGIC Because of that, **this notebook is read-only for you.** You connect to the existing
+# MAGIC shared index and query it; you create nothing and delete nothing, and the whole room
+# MAGIC can run it at the same time. The provisioning code (source table, endpoint, index) is
+# MAGIC included below **for reference but commented out** — an organiser ran it once before
+# MAGIC the session. The endpoint, index and source-table names are deliberately **shared**
+# MAGIC (no per-user suffix) so everyone points at the same asset. (Principles 2 cost,
+# MAGIC 5 lifecycle, 7 shared governed assets, 10 governance.)
 
 # COMMAND ----------
 
@@ -50,7 +46,7 @@
 # MAGIC | Stage | What happens | Principles |
 # MAGIC |-------|--------------|------------|
 # MAGIC | Reuse existing embeddings | Read the tutorial's features; no re-embedding | P2 (cost), P7 (reuse governed assets) |
-# MAGIC | Shared, admin-provisioned index | One endpoint/index for all; attendees read-only | P2, P5, P7, P10 |
+# MAGIC | Shared, pre-provisioned index | One endpoint/index for all; attendees read-only | P2, P5, P7, P10 |
 # MAGIC | Post-to-post & free-text retrieval | Same-model embedding for index and query | P5, P6 |
 # MAGIC | Near-duplicate detection | Flags for a human to confirm, not an automated decision | P4 |
 # MAGIC | Few-shot label retrieval | Retrieved labels are a signal, not ground truth | P1, P4 |
@@ -71,35 +67,25 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# DBTITLE 1,Role: attendee (read-only) or admin (provisions the shared index)
-# Attendees leave this as "attendee". The organiser sets it to "admin" once, before the
-# session, to run the setup section. Everything gated by IS_ADMIN is skipped otherwise.
-dbutils.widgets.dropdown("role", "attendee", ["attendee", "admin"])
-IS_ADMIN = dbutils.widgets.get("role") == "admin"
-print(f"Running as: {'ADMIN (setup enabled)' if IS_ADMIN else 'attendee (read-only)'}")
-
-# COMMAND ----------
-
 # DBTITLE 1,Configuration
 from databricks.vector_search.client import VectorSearchClient
 from pyspark.sql import functions as F
-from datetime import datetime, UTC
 
 UC_CATALOG = "hackathon"
 UC_SCHEMA = "default"
 
-# ── SHARED, admin-provisioned infrastructure ──────────────────────────────────
+# ── SHARED infrastructure (provisioned once, before the session) ───────────────
 # These names are deliberately NOT per-user: one endpoint and one index are shared
-# by everyone on the day. Attendees connect to them read-only; only the admin setup
-# section (below) creates them. Do not add a username suffix here.
+# by everyone on the day. You connect to them read-only. The code that created them
+# is shown further down but commented out — an organiser ran it once. Do not add a
+# username suffix here.
 VS_ENDPOINT_NAME = "hackathon_vs_shared"
 VS_INDEX_NAME    = f"{UC_CATALOG}.{UC_SCHEMA}.tutorial_sci_med_vs_index"
 VS_SOURCE_TABLE  = f"{UC_CATALOG}.{UC_SCHEMA}.tutorial_sci_med_vs_source"
 
-# ── ADMIN ONLY: the features table the shared index is built from ──────────────
-# Point this at the FEATURES_TABLE your tutorial run produced. Used only by the
-# admin setup section; attendees never read it.
-ADMIN_FEATURES_TABLE = f"{UC_CATALOG}.{UC_SCHEMA}.tutorial_sci_med_features_tutorial"
+# Features table the shared index was built from — referenced only by the
+# (commented-out) provisioning code below; attendees never read it.
+FEATURES_TABLE = f"{UC_CATALOG}.{UC_SCHEMA}.tutorial_sci_med_features_tutorial"
 
 # ── Embedding model — MUST match the model that produced the `embedding` column ─
 # Otherwise the index and your free-text queries live in different vector spaces (P5).
@@ -130,12 +116,12 @@ print(f"Shared endpoint: {VS_ENDPOINT_NAME}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # ══════════════ ADMIN SETUP (run once) ══════════════
+# MAGIC # ══════════════ HOW THE SHARED INFRASTRUCTURE WAS BUILT (reference only) ══════════════
 # MAGIC
-# MAGIC Everything in this section is guarded by `if IS_ADMIN:` and only runs when the
-# MAGIC `role` widget is set to `admin`. It is **idempotent** — existing endpoint/index are
-# MAGIC reused, and the source table is overwritten in place — so it is safe to re-run.
-# MAGIC Attendees skip all of it.
+# MAGIC The three cells in this section are **commented out** — an organiser ran them once
+# MAGIC before the session to build the shared source table, endpoint and index. They are
+# MAGIC left here so you can see exactly how the shared assets were made, but running this
+# MAGIC notebook creates nothing. **Skip straight to *Connect to the shared index* below.**
 # MAGIC
 # MAGIC ### Choosing the index type
 # MAGIC
@@ -150,105 +136,108 @@ print(f"Shared endpoint: {VS_ENDPOINT_NAME}")
 
 # COMMAND ----------
 
-# DBTITLE 1,ADMIN: build the shared, index-friendly source table
-if IS_ADMIN:
-    # FEATURES_TABLE also holds MLlib VectorUDT columns (features / normalized_features)
-    # which are NOT valid Delta Sync source columns, so we project to a clean table.
-    # We also cast the numeric feature columns to index-supported types (Vector Search
-    # rejects decimal; distance must be double, cluster int).
-    features_df = spark.table(ADMIN_FEATURES_TABLE)
-
-    vs_source_df = features_df.select(
-        "article_id", "topic", "subject", "text", "summary", "embedding",
-        F.col("cluster").cast("int").alias("cluster"),
-        F.col("distance_to_centroid").cast("double").alias("distance_to_centroid"),
-        "tension_label", "tension_reasoning",
-    )
-
-    (
-        vs_source_df.write
-        .format("delta")
-        .mode("overwrite")
-        .option("overwriteSchema", "true")
-        .saveAsTable(VS_SOURCE_TABLE)
-    )
-
-    # Delta Sync requires Change Data Feed on the source table.
-    spark.sql(f"ALTER TABLE {VS_SOURCE_TABLE} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
-
-    # UC column comments via ALTER TABLE (serverless-safe — no RDD/schema round-trip).
-    COLUMN_COMMENTS = {
-        "article_id":           "Unique identifier; primary key of the Vector Search index",
-        "topic":                "Newsgroup topic label; used as a retrieval filter",
-        "subject":              "Subject line of the original post (PII masked)",
-        "text":                 "Article body: headers stripped, person/email PII masked",
-        "summary":              "LLM summary the embedding was generated from",
-        "embedding":            "1024-dim databricks-bge-large-en vector; self-managed index column",
-        "cluster":              "KMeans cluster assignment from the tutorial (k=3)",
-        "distance_to_centroid": "Distance to assigned cluster centroid, from the tutorial",
-        "tension_label":        "LLM-classified tone: escalating, de-escalating, or neutral",
-        "tension_reasoning":    "One-sentence LLM justification for tension_label",
-    }
-    for col, comment in COLUMN_COMMENTS.items():
-        safe = comment.replace("'", "''")
-        spark.sql(f"ALTER TABLE {VS_SOURCE_TABLE} ALTER COLUMN {col} COMMENT '{safe}'")
-
-    spark.sql(f"""
-        COMMENT ON TABLE {VS_SOURCE_TABLE} IS
-        'Shared Vector Search source: clean projection of {ADMIN_FEATURES_TABLE} with the bge-large-en embedding and key metadata. Change Data Feed enabled for Delta Sync.'
-    """)
-    print(f"Built shared source table {VS_SOURCE_TABLE} with CDF enabled.")
-else:
-    print("Skipped (attendee): shared source table is provisioned by the admin.")
+# DBTITLE 1,Reference: how the shared source table was built (commented out — do not run)
+# An organiser ran this once to build an index-friendly source table. FEATURES_TABLE also
+# holds MLlib VectorUDT columns (features / normalized_features) which are NOT valid Delta
+# Sync source columns, so it projects to a clean table and casts the numeric feature
+# columns to index-supported types (Vector Search rejects decimal; distance must be
+# double, cluster int).
+#
+# features_df = spark.table(FEATURES_TABLE)
+#
+# vs_source_df = features_df.select(
+#     "article_id", "topic", "subject", "text", "summary", "embedding",
+#     F.col("cluster").cast("int").alias("cluster"),
+#     F.col("distance_to_centroid").cast("double").alias("distance_to_centroid"),
+#     "tension_label", "tension_reasoning",
+# )
+#
+# (
+#     vs_source_df.write
+#     .format("delta")
+#     .mode("overwrite")
+#     .option("overwriteSchema", "true")
+#     .saveAsTable(VS_SOURCE_TABLE)
+# )
+#
+# # Delta Sync requires Change Data Feed on the source table.
+# spark.sql(f"ALTER TABLE {VS_SOURCE_TABLE} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)")
+#
+# # UC column comments via ALTER TABLE (serverless-safe — no RDD/schema round-trip).
+# COLUMN_COMMENTS = {
+#     "article_id":           "Unique identifier; primary key of the Vector Search index",
+#     "topic":                "Newsgroup topic label; used as a retrieval filter",
+#     "subject":              "Subject line of the original post (PII masked)",
+#     "text":                 "Article body: headers stripped, person/email PII masked",
+#     "summary":              "LLM summary the embedding was generated from",
+#     "embedding":            "1024-dim databricks-bge-large-en vector; self-managed index column",
+#     "cluster":              "KMeans cluster assignment from the tutorial (k=3)",
+#     "distance_to_centroid": "Distance to assigned cluster centroid, from the tutorial",
+#     "tension_label":        "LLM-classified tone: escalating, de-escalating, or neutral",
+#     "tension_reasoning":    "One-sentence LLM justification for tension_label",
+# }
+# for col, comment in COLUMN_COMMENTS.items():
+#     safe = comment.replace("'", "''")
+#     spark.sql(f"ALTER TABLE {VS_SOURCE_TABLE} ALTER COLUMN {col} COMMENT '{safe}'")
+#
+# spark.sql(f"""
+#     COMMENT ON TABLE {VS_SOURCE_TABLE} IS
+#     'Shared Vector Search source: clean projection of the tutorial features table with the bge-large-en embedding and key metadata. Change Data Feed enabled for Delta Sync.'
+# """)
 
 # COMMAND ----------
 
-# DBTITLE 1,ADMIN: create the shared endpoint (idempotent)
-if IS_ADMIN:
-    # STANDARD is right here: low latency and dictionary-format filters. 200 rows is tiny;
-    # STORAGE_OPTIMIZED is for 1B+ vectors and would be overkill.
-    existing = [e["name"] for e in vsc.list_endpoints().get("endpoints", [])]
-    if VS_ENDPOINT_NAME in existing:
-        print(f"Endpoint '{VS_ENDPOINT_NAME}' already exists — reusing it.")
-    else:
-        print(f"Creating STANDARD endpoint '{VS_ENDPOINT_NAME}' (can take several minutes)...")
-        vsc.create_endpoint_and_wait(name=VS_ENDPOINT_NAME, endpoint_type="STANDARD")
-        print("Endpoint is ONLINE.")
-else:
-    print("Skipped (attendee): endpoint is provisioned by the admin.")
+# DBTITLE 1,Reference: creating the shared endpoint (commented out — do not run)
+# We deliberately create ONE shared, always-on endpoint for the whole room rather than one
+# per attendee. An endpoint is persistent, billed compute — dozens of duplicates would bill
+# for nothing extra, since everyone queries the same data. So an organiser ran this once
+# before the session; it is commented out here to keep the notebook read-only.
+# (Principles 2 cost, 5 lifecycle.)
+#
+# STANDARD is the right type here: low latency and dictionary-format filters. 200 rows is
+# tiny; STORAGE_OPTIMIZED is for 1B+ vectors and would be overkill.
+#
+# existing = [e["name"] for e in vsc.list_endpoints().get("endpoints", [])]
+# if VS_ENDPOINT_NAME in existing:
+#     print(f"Endpoint '{VS_ENDPOINT_NAME}' already exists — reusing it.")
+# else:
+#     print(f"Creating STANDARD endpoint '{VS_ENDPOINT_NAME}' (can take several minutes)...")
+#     vsc.create_endpoint_and_wait(name=VS_ENDPOINT_NAME, endpoint_type="STANDARD")
+#     print("Endpoint is ONLINE.")
 
 # COMMAND ----------
 
-# DBTITLE 1,ADMIN: create the shared self-managed Delta Sync index (idempotent)
-if IS_ADMIN:
-    existing_indexes = [i["name"] for i in vsc.list_indexes(VS_ENDPOINT_NAME).get("vector_indexes", [])]
-    if VS_INDEX_NAME in existing_indexes:
-        print(f"Index '{VS_INDEX_NAME}' already exists — reusing it. Triggering a sync...")
-        vsc.get_index(VS_ENDPOINT_NAME, VS_INDEX_NAME).sync()
-    else:
-        print(f"Creating self-managed Delta Sync index '{VS_INDEX_NAME}' ...")
-        vsc.create_delta_sync_index_and_wait(
-            endpoint_name=VS_ENDPOINT_NAME,
-            index_name=VS_INDEX_NAME,
-            source_table_name=VS_SOURCE_TABLE,
-            pipeline_type="TRIGGERED",          # sync on demand with index.sync()
-            primary_key="article_id",
-            embedding_vector_column="embedding",  # reuse the tutorial's vectors
-            embedding_dimension=EMBEDDING_DIM,    # 1024 for bge-large-en
-        )
-        print("Index is ready.")
-
-    # ── Managed-embeddings alternative (option a), for comparison — do NOT run ──
-    # Lets Databricks embed the `summary` text so you could query with query_text.
-    # We do not use it because it re-embeds text we already embedded.
-    #
-    # vsc.create_delta_sync_index_and_wait(
-    #     endpoint_name=VS_ENDPOINT_NAME, index_name=VS_INDEX_NAME,
-    #     source_table_name=VS_SOURCE_TABLE, pipeline_type="TRIGGERED",
-    #     primary_key="article_id", embedding_source_column="summary",
-    #     embedding_model_endpoint_name="databricks-bge-large-en")  # pin the SAME model
-else:
-    print("Skipped (attendee): index is provisioned by the admin.")
+# DBTITLE 1,Reference: creating the shared self-managed Delta Sync index (commented out — do not run)
+# The index is self-managed: it reuses the tutorial's stored `embedding` column rather than
+# re-embedding, so there is no extra embedding cost and the index shares the documents'
+# vector space (P5). An organiser ran this once; it is commented out here.
+#
+# existing_indexes = [i["name"] for i in vsc.list_indexes(VS_ENDPOINT_NAME).get("vector_indexes", [])]
+# if VS_INDEX_NAME in existing_indexes:
+#     print(f"Index '{VS_INDEX_NAME}' already exists — reusing it. Triggering a sync...")
+#     vsc.get_index(VS_ENDPOINT_NAME, VS_INDEX_NAME).sync()
+# else:
+#     print(f"Creating self-managed Delta Sync index '{VS_INDEX_NAME}' ...")
+#     vsc.create_delta_sync_index_and_wait(
+#         endpoint_name=VS_ENDPOINT_NAME,
+#         index_name=VS_INDEX_NAME,
+#         source_table_name=VS_SOURCE_TABLE,
+#         pipeline_type="TRIGGERED",            # sync on demand with index.sync()
+#         primary_key="article_id",
+#         embedding_vector_column="embedding",  # reuse the tutorial's vectors
+#         embedding_dimension=EMBEDDING_DIM,    # 1024 for bge-large-en
+#     )
+#     print("Index is ready.")
+#
+# # ── Managed-embeddings alternative (option a), for comparison ──
+# # Lets Databricks embed the `summary` text so you could query with query_text.
+# # We do not use it because it re-embeds text we already embedded.
+# #
+# # vsc.create_delta_sync_index_and_wait(
+# #     endpoint_name=VS_ENDPOINT_NAME, index_name=VS_INDEX_NAME,
+# #     source_table_name=VS_SOURCE_TABLE, pipeline_type="TRIGGERED",
+# #     primary_key="article_id", embedding_source_column="summary",
+# #     embedding_model_endpoint_name="databricks-bge-large-en")  # pin the SAME model
 
 # COMMAND ----------
 
@@ -259,7 +248,7 @@ else:
 
 # DBTITLE 1,Connect to the shared index
 # Read-only: every attendee runs this and shares the one index. If it is missing, the
-# admin has not run the setup section yet.
+# organiser has not run the (commented-out) provisioning cells above yet.
 try:
     index = vsc.get_index(VS_ENDPOINT_NAME, VS_INDEX_NAME)
     status = index.describe().get("status", {})
@@ -269,8 +258,8 @@ try:
 except Exception as e:
     raise RuntimeError(
         f"Shared index '{VS_INDEX_NAME}' not found on endpoint '{VS_ENDPOINT_NAME}'. "
-        "Ask your workshop admin to run the Admin setup section once "
-        "(set the 'role' widget to 'admin')."
+        "Ask your workshop organiser to run the provisioning cells above once "
+        "(they are commented out by default)."
     ) from e
 
 RESULT_COLS = ["article_id", "topic", "summary", "cluster", "tension_label"]
@@ -278,25 +267,29 @@ RESULT_COLS = ["article_id", "topic", "summary", "cluster", "tension_label"]
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Use case 1 — "find the posts most similar to this one"
+# MAGIC ## Use case 1 — "here is a flagged post; find related discussions"
 # MAGIC
-# MAGIC The cheapest possible query: take a post's **stored** embedding and ask the index for
-# MAGIC its nearest neighbours. No new embedding call is needed. We ask for one extra result
-# MAGIC and drop the post itself (a post is always its own nearest neighbour).
+# MAGIC The tutorial flagged each post with a `tension_label` (escalating / de-escalating /
+# MAGIC neutral). A natural analyst question is: *given one post that was flagged as
+# MAGIC escalating, what other discussions look like it?* We take that post's **stored**
+# MAGIC embedding and ask the index for its nearest neighbours — no new embedding call is
+# MAGIC needed. We ask for one extra result and drop the post itself (a post is always its
+# MAGIC own nearest neighbour).
 
 # COMMAND ----------
 
-# DBTITLE 1,Post-to-post similarity
+# DBTITLE 1,Post-to-post similarity from a flagged post
 # Read a seed post's stored vector from the shared source table (a read-only SELECT —
-# attendees need only SELECT on this table, they never provision anything).
+# attendees need only SELECT on this table, they never provision anything). We start from
+# a post the tutorial flagged as escalating.
 seed = (
     spark.table(VS_SOURCE_TABLE)
-    .filter(F.col("topic") == "rec.autos")
-    .select("article_id", "topic", "summary", "embedding", "cluster")
+    .filter(F.col("tension_label") == "escalating")
+    .select("article_id", "topic", "summary", "embedding", "tension_label")
     .limit(1)
     .collect()[0]
 )
-print(f"Seed post {seed['article_id']} (topic={seed['topic']}, cluster={seed['cluster']}):")
+print(f"Seed post {seed['article_id']} (topic={seed['topic']}, tension={seed['tension_label']}):")
 print(f"  {seed['summary']}\n")
 
 res = index.similarity_search(
@@ -306,31 +299,34 @@ res = index.similarity_search(
 )
 seed_id = seed["article_id"]
 
-print(f"{'article_id':<14}{'topic':<20}{'cluster':<9}{'score':<8}summary")
+print(f"{'article_id':<14}{'topic':<18}{'tension':<15}{'score':<8}summary")
 for r in res["result"]["data_array"]:
     aid, topic, summary, cluster, tension, score = r
     if aid == seed_id:
         continue  # drop the seed's self-match
-    print(f"{aid:<14}{topic:<20}{str(cluster):<9}{score:<8.3f}{(summary or '')[:70]}")
+    print(f"{aid:<14}{topic:<18}{str(tension):<15}{score:<8.3f}{(summary or '')[:60]}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Notice the nearest neighbours are almost all from the same newsgroup and the same
-# MAGIC KMeans cluster as the seed — retrieval and clustering agree because they read the same
-# MAGIC geometry. But retrieval gives a *ranked, per-item* answer with scores, where clustering
-# MAGIC gave a single hard label. That finer granularity is the point.
+# MAGIC The neighbours are **topically** similar, because the embeddings encode the *theme*
+# MAGIC of each post. Now read across to their `tension_label`: where related posts also carry
+# MAGIC an escalating tone, you are looking at a cluster of heated discussion on a single theme
+# MAGIC — exactly the shape of a discussion-monitoring or early-warning question. Retrieval
+# MAGIC gives a *ranked, per-item* answer with scores, where the tutorial's KMeans gave a
+# MAGIC single hard label; that finer granularity is the point.
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Use case 2 — free-text semantic query
+# MAGIC ## Use case 2 — free-text semantic query, scoped by a filter
 # MAGIC
-# MAGIC A query that is **not** already in the table. Because our index is *self-managed*, it
-# MAGIC does not embed text for us — so we embed the query string ourselves with the **same**
-# MAGIC `databricks-bge-large-en` model the tutorial used for the documents. Embedding with a
-# MAGIC different model would place the query in an incompatible space. This is **Principle 5**
-# MAGIC made concrete. We also show a **filter** — governed, scoped retrieval.
+# MAGIC An analyst rarely starts from an existing row — usually they have a *theme in mind* and
+# MAGIC want the posts closest to it. That query text is **not** in the table, so we embed it
+# MAGIC ourselves. Because our index is *self-managed*, it does not embed text for us — so we
+# MAGIC must use the **same** `databricks-bge-large-en` model the documents were embedded with.
+# MAGIC A different model would place the query in an incompatible space. This is **Principle 5**
+# MAGIC made concrete. We also apply a **filter** — governed, scoped retrieval.
 
 # COMMAND ----------
 
@@ -343,7 +339,7 @@ def embed_query(text: str) -> list:
     ).collect()[0]
     return [float(x) for x in row["v"]]
 
-query_text = "spacecraft propulsion and orbital mechanics"
+query_text = "arguments about the cost and politics of the space programme"
 qv = embed_query(query_text)
 assert len(qv) == EMBEDDING_DIM
 
@@ -355,17 +351,20 @@ res = index.similarity_search(
 )
 
 print(f"Query: {query_text!r}  (filtered to sci.space)\n")
-print(f"{'article_id':<14}{'score':<8}summary")
+print(f"{'article_id':<14}{'tension':<15}{'score':<8}summary")
 for r in res["result"]["data_array"]:
     aid, topic, summary, cluster, tension, score = r
-    print(f"{aid:<14}{score:<8.3f}{(summary or '')[:80]}")
+    print(f"{aid:<14}{str(tension):<15}{score:<8.3f}{(summary or '')[:70]}")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC **Principle 1 (know the limits):** the scores are *relative* similarities, not
-# MAGIC calibrated probabilities, and the results are only as good as the lossy summaries the
-# MAGIC embeddings were built from. A high rank means "closest available", not "correct".
+# MAGIC calibrated probabilities, and the embeddings were built from lossy one-sentence
+# MAGIC summaries — which capture a post's *theme* far better than its *tone*. So retrieval
+# MAGIC finds you posts on a subject; read the `tension_label` column (or filter on it, e.g.
+# MAGIC `filters={"tension_label": "escalating"}`) to scope to the heated ones. A high rank
+# MAGIC means "closest available", not "correct".
 
 # COMMAND ----------
 
@@ -491,25 +490,22 @@ print(few_shot_block)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC # ══════════════ ADMIN TEARDOWN ══════════════
+# MAGIC # ══════════════ TEARDOWN (organiser only, after the session) ══════════════
 # MAGIC
-# MAGIC **Do not run this during the workshop** — it deletes the *shared* index and endpoint
-# MAGIC that everyone else is using. It is guarded by `if IS_ADMIN:` and is intended only for
-# MAGIC the organiser to run **after** the session, so the always-on endpoint stops billing
-# MAGIC (Principles 2 and 5).
+# MAGIC The cell below is **commented out** and is intended only for the organiser to run
+# MAGIC **after** the session, so the always-on endpoint stops billing (Principles 2 and 5).
+# MAGIC It deletes the *shared* index and endpoint that everyone else is using, so it must
+# MAGIC never be run during the workshop.
 
 # COMMAND ----------
 
-# DBTITLE 1,ADMIN: delete the shared index and endpoint (post-workshop only)
-TEARDOWN = False  # admin sets this to True, after the session, to actually delete
-
-if IS_ADMIN and TEARDOWN:
-    vsc.delete_index(index_name=VS_INDEX_NAME)
-    print(f"Deleted index {VS_INDEX_NAME}.")
-    vsc.delete_endpoint(name=VS_ENDPOINT_NAME)
-    print(f"Deleted endpoint {VS_ENDPOINT_NAME}.")
-else:
-    print("Teardown skipped. (Admin: set TEARDOWN=True after the session to delete shared infra.)")
+# DBTITLE 1,Reference: delete the shared index and endpoint (organiser, post-workshop only)
+# Uncomment and run ONLY after the session, once nobody else needs the shared index.
+#
+# vsc.delete_index(index_name=VS_INDEX_NAME)
+# print(f"Deleted index {VS_INDEX_NAME}.")
+# vsc.delete_endpoint(name=VS_ENDPOINT_NAME)
+# print(f"Deleted endpoint {VS_ENDPOINT_NAME}.")
 
 # COMMAND ----------
 
@@ -520,7 +516,7 @@ else:
 # MAGIC retrieval — similar-item lookup, free-text search, near-duplicate detection, and
 # MAGIC few-shot feature engineering — all against a single shared, governed index.
 # MAGIC
-# MAGIC For your own project, an admin can point a new index at your team's corpus (for
+# MAGIC For your own project, an organiser can point a new index at your team's corpus (for
 # MAGIC example the parsed CQC inspection reports) and ask: *which reports are most similar to
 # MAGIC a known problem case?* Remember to embed with a single, consistent model, share one
 # MAGIC index rather than one-per-person, keep a human in the loop on anything you flag, and
