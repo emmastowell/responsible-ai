@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # MAGIC %md
 # MAGIC # Semantic Features in Statistical Workflows — Tutorial
 # MAGIC
@@ -439,8 +443,8 @@ def redact_structured(df, text_col="text"):
 
 redacted_df = (
     processed_df
-    .withColumn("text", F.expr("ai_mask(text,array('person', 'email'))"))
-    .withColumn("subject",F.expr("ai_mask(subject,array('person', 'email'))"))
+    .withColumn("text", F.expr("ai_mask(CAST(text AS STRING), array('person', 'email'))"))
+    .withColumn("subject", F.expr("ai_mask(CAST(subject AS STRING), array('person', 'email'))"))
 )
 redacted_df = redact_structured(redacted_df,text_col="text")
 redacted_df = redact_structured(redacted_df,text_col="subject")
@@ -501,25 +505,37 @@ print(COLUMN_MASK_EXAMPLE)
 # COMMAND ----------
 
 # DBTITLE 1,Define table schema with field level metadata
-def field(name, dtype, comment):
-    """Shorthand for a StructField carrying a UC column comment."""
-    return StructField(name, dtype, True, {"comment": comment})
+# Column metadata (name, type, comment) for Unity Catalog
+column_metadata = [
+    ("article_id",        "STRING",  "Unique identifier from the source dataset"),
+    ("topic",             "STRING",  "Newsgroup topic label (filtered to talk.religion.misc, rec.autos, sci.space)"),
+    ("subject",           "STRING",  "Subject line of the original post with emails and names redacted"),
+    ("organization",      "STRING",  "Organization header, self-reported by the poster"),
+    ("lines_header",      "STRING",  "Line count as given by the header"),
+    ("distribution",      "STRING",  "Distribution header, where present"),
+    ("text",              "STRING",  "Article body with headers stripped and emails and names redacted"),
+    ("char_count",        "INT",     "Character count of the stripped body text"),
+    ("word_count",        "INT",     "Word count of the stripped body text"),
+]
 
-raw_schema = StructType([
-    field("article_id",        StringType(),  "Unique identifier from the source dataset"),
-    field("topic",          StringType(),  "Newsgroup topic label (filtered to talk.religion.misc, rec.autos, sci.space)"),
-    field("subject",           StringType(),  "Subject line of the original post with emails and names redacted"),
-    field("organization",      StringType(),  "Organization header, self-reported by the poster"),
-    field("lines_header",      StringType(),  "Line count as given by the header"),
-    field("distribution",      StringType(),  "Distribution header, where present"),
-    field("text",              StringType(),  "Article body with headers stripped and emails and names redacted"),
-    field("char_count",        IntegerType(), "Character count of the stripped body text"),
-    field("word_count",        IntegerType(), "Word count of the stripped body text"),
-])
+# Cast columns to explicit types (Spark Connect compatible - no .rdd access needed)
+processed_df_with_comments = redacted_df.select(
+    F.col("article_id").cast("string"),
+    F.col("topic").cast("string"),
+    F.col("subject").cast("string"),
+    F.col("organization").cast("string"),
+    F.col("lines_header").cast("string"),
+    F.col("distribution").cast("string"),
+    F.col("text").cast("string"),
+    F.col("char_count").cast("int"),
+    F.col("word_count").cast("int")
+)
 
-# Apply the schema to your existing DataFrame (column order/names must match)
-processed_df_with_comments = spark.createDataFrame(redacted_df.rdd, schema=raw_schema)
+# Ensure schema exists before writing table
+spark.sql(f"CREATE CATALOG IF NOT EXISTS {UC_CATALOG}")
+spark.sql(f"CREATE SCHEMA IF NOT EXISTS {UC_CATALOG}.{UC_SCHEMA}")
 
+# Write table
 (
     processed_df_with_comments.write
     .format("delta")
@@ -527,6 +543,13 @@ processed_df_with_comments = spark.createDataFrame(redacted_df.rdd, schema=raw_s
     .option("overwriteSchema", "true")
     .saveAsTable(PROCESSED_TABLE)
 )
+
+# Apply column comments via ALTER TABLE (Spark Connect compatible)
+for col_name, col_type, col_comment in column_metadata:
+    spark.sql(f"""
+        ALTER TABLE {PROCESSED_TABLE}
+        ALTER COLUMN `{col_name}` COMMENT '{col_comment.replace("'", "\\'")}';
+    """)
 
 # COMMAND ----------
 
@@ -658,12 +681,21 @@ summarised_df = spark.table(SUMMARISED_TABLE)  # read back — this "cuts" the l
 # MAGIC %md
 # MAGIC #### Step 2: Text embedding
 # MAGIC
-# MAGIC Next we embed the text using a vector embedding model
+# MAGIC Next we convert the summarized text into **vector embeddings** — numerical representations that capture semantic meaning. Each summary becomes a point in high-dimensional space, where semantically similar texts are positioned closer together.
+# MAGIC
+# MAGIC **Why embeddings?** Statistical clustering algorithms require numerical inputs. By embedding our text summaries, we can:
+# MAGIC * Measure semantic similarity between posts using distance metrics (cosine similarity, Euclidean distance)
+# MAGIC * Apply standard clustering algorithms like K-Means
+# MAGIC * Discover thematic groups in the data without manual labeling
+# MAGIC
+# MAGIC **The model:** We're using `databricks-qwen3-embedding-0-6b`, an efficient text embedding model from the Qwen3 family. This model balances quality and cost — it's faster and more economical than larger models while still capturing semantic relationships effectively for clustering tasks.
+# MAGIC
+# MAGIC **Important:** Embedding models encode the meaning present in the text, but they don't understand your specific domain or use case. This is why expert review (Principle 4) is critical — the clusters we discover must make sense to subject matter experts, not just to the algorithm.
 
 # COMMAND ----------
 
 # DBTITLE 1,Text embedding
-EMBEDDING_ENDPOINT = "databricks-bge-large-en"  
+EMBEDDING_ENDPOINT = "databricks-qwen3-embedding-0-6b"  
 
 embedded_df = (
     summarised_df  
@@ -714,6 +746,32 @@ for k in range(2, 9):
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC **Interpreting the Results Above**
+# MAGIC
+# MAGIC The silhouette scores measure cluster quality — how distinct and cohesive each cluster is. Higher scores (closer to 1.0) indicate tighter, more separated clusters. Our best score of ~0.09 at k=3 is modest, which tells us:
+# MAGIC
+# MAGIC * The three newsgroups (religion, autos, space) do form somewhat distinct semantic clusters
+# MAGIC * However, the clusters are not extremely tight — discussions within a newsgroup can wander across topics
+# MAGIC * This is realistic: online discussions often digress or cross-reference other subjects
+# MAGIC
+# MAGIC A perfect silhouette of 1.0 would mean every post is maximally similar to its cluster and maximally different from other clusters — rarely achieved with real conversational text.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC **What This Tells Us**
+# MAGIC
+# MAGIC Examining posts that fall into unexpected clusters (e.g., an autos post classified into the religion cluster) reveals:
+# MAGIC
+# MAGIC * **Topic drift** — conversations that start on-topic but veer into other subjects
+# MAGIC * **Cross-domain references** — analogies or comparisons between domains ("buying a car is an act of faith...")
+# MAGIC * **Data quality issues** — misclassified posts, quotes from other threads, or generic replies
+# MAGIC
+# MAGIC These outliers are valuable for quality assurance and for understanding the limitations of clustering — another reminder of **Principle 4: human review is essential**.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC As we chose 3 different newsgroups, it is not surprising to find that three clusters is the best fit.  Note also that these are not very tight clusters -- the highest silouette is only 0.1244.  So we can see that the discussions in newsgroups can tend to wander.
 
 # COMMAND ----------
@@ -744,15 +802,28 @@ display(clustered_df
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC #### Step 4: Interpreting Cluster Assignments
+# MAGIC
+# MAGIC Now we examine **distance to centroid** — how far each post's embedding is from the center of its assigned cluster. This metric tells us:
+# MAGIC
+# MAGIC * **Posts closest to the centroid** represent the "most typical" examples of that cluster's theme
+# MAGIC * **Posts far from the centroid** are semantically unusual or bridge multiple topics
+# MAGIC * **Distance as a feature** can signal outliers, ambiguous cases, or off-topic content for downstream models
+# MAGIC
+# MAGIC This is another application of **Principle 1** (understanding AI limitations) — clustering assigns every point to *some* cluster, even if it doesn't fit well. Distance metrics help us identify those problematic assignments.
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC Next we can look at how far a given post summary is from the center of its assigned cluster and use that to examine the posts whose topics are most central to these clusters.
 
 # COMMAND ----------
 
 centers = model.clusterCenters()  # list of numpy arrays, one per cluster
-centers_broadcast = spark.sparkContext.broadcast(centers)
 
+# Capture centers directly in the UDF closure (serverless-compatible)
 def distance_to_centroid(features, cluster):
-    center = centers_broadcast.value[cluster]
+    center = centers[cluster]
     return float(np.linalg.norm(np.array(features) - center))
 
 distance_udf = F.udf(distance_to_centroid, T.DoubleType())
@@ -788,6 +859,32 @@ classified_df = spark.table(CLASSIFIED_TABLE)  # read back — this "cuts" the l
 
 # MAGIC %md
 # MAGIC ### Structured field extraction with `ai_query`
+# MAGIC
+# MAGIC So far we've used LLMs for summarization, embedding, and clustering — tasks where the output shape is fixed (a sentence, a vector, a cluster ID). But one of the most powerful capabilities of `ai_query` is **structured extraction**: transforming free-text into typed, queryable fields that downstream systems can filter, aggregate, and join.
+# MAGIC
+# MAGIC **What is structured extraction?** It's the process of reading unstructured text and pulling out specific pieces of information in a predictable format — sentiment labels, entity lists, ratings, categorizations, or any other domain-specific attributes that don't appear explicitly in the source data but can be inferred from it.
+# MAGIC
+# MAGIC **Why does this matter?** Most real-world data arrives as free text: support tickets, customer reviews, medical notes, legal documents, social media posts. To analyze it at scale, you need to convert it into features a statistical model or dashboard can work with. Traditional approaches (regex, rule-based NLP, hand-labeled training data) are brittle, time-consuming, or require ML expertise. LLM-based extraction with `ai_query` offers a middle path: **you describe what you want in a prompt**, and the model extracts it.
+# MAGIC
+# MAGIC **The workflow:**
+# MAGIC 1. **Craft a prompt** that specifies exactly what to extract and in what format (typically JSON)
+# MAGIC 2. **Call `ai_query`** with the prompt + text as input
+# MAGIC 3. **Parse the JSON response** using Spark's `from_json()` to create typed columns
+# MAGIC 4. **Validate and normalize** the results — LLMs are stochastic, so downstream cleanup and expert review (Principle 4) are essential
+# MAGIC
+# MAGIC **Two extraction patterns demonstrated below:**
+# MAGIC
+# MAGIC **Pattern 1: Classification / labeling** (Step 1: Tension rating)  
+# MAGIC Assign each row to one of a fixed set of categories. Here we classify the tone of Usenet posts as *escalating*, *de-escalating*, or *neutral*. This creates a categorical feature for downstream analysis or filtering.
+# MAGIC
+# MAGIC **Pattern 2: Entity extraction** (Step 2: Car makes and models)  
+# MAGIC Pull out domain-specific entities mentioned in the text — car manufacturers, product names, locations, etc. This creates list-valued features that can be exploded, counted, or used to drive recommendations.
+# MAGIC
+# MAGIC **Key principle: Validate, don't trust.** LLMs are powerful but fallible. They hallucinate, misinterpret context, and drift as models update. Always:
+# MAGIC * Test on a representative sample before running at scale
+# MAGIC * Compare against a baseline (dictionary lookup, regex) when one exists
+# MAGIC * Build human review into the pipeline (Principle 4)
+# MAGIC * Monitor extraction quality over time (Principle 5)
 # MAGIC
 
 # COMMAND ----------
@@ -846,43 +943,42 @@ display(unpacked_df.crosstab('topic','tension_label'))
 
 # COMMAND ----------
 
-def field(name, dtype, comment):
-    """Shorthand for a StructField carrying a UC column comment."""
-    return StructField(name, dtype, True, {"comment": comment})
-
-unpacked_schema = StructType([
-    field("article_id",          StringType(),               "Unique identifier from the source dataset"),
-    field("topic",                StringType(),               "Newsgroup topic label (filtered to talk.religion.misc, rec.autos, sci.space)"),
-    field("subject",              StringType(),               "Subject line of the original post"),
-    field("organization",         StringType(),               "Organization header, self-reported by the poster"),
-    field("lines_header",         StringType(),               "Original Lines: header value (not verified against actual line count)"),
-    field("distribution",         StringType(),               "Distribution header, where present"),
-    field("text",                 StringType(),               "Article body: headers and footer stripped, person/email PII masked"),
-    field("char_count",           IntegerType(),              "Character count of the cleaned body text"),
-    field("word_count",           IntegerType(),              "Word count of the cleaned body text"),
-    field("summary",              StringType(),               "LLM-generated summary of the article body (ai_summarize / ai_query, ~30 words)"),
-    field("embedding",            ArrayType(FloatType()),     "Raw embedding vector from the databricks-bge-large-en endpoint, generated from the summary"),
-    field("features",             VectorUDT(),                "Embedding cast to MLlib Vector type, input to KMeans"),
-    field("normalized_features",  VectorUDT(),                "L2-normalized embedding vector; KMeans was fit on this column, not raw features"),
-    field("cluster",              IntegerType(),              "KMeans cluster assignment (k=3, fit on normalized_features)"),
-    field("distance_to_centroid", DoubleType(),                "Euclidean distance from this point to its assigned cluster's centroid, in normalized_features space"),
-    field("tension_label",        StringType(),               "LLM-classified tone of the post: escalating, de-escalating, or neutral"),
-    field("tension_reasoning",    StringType(),               "One-sentence LLM justification for the tension_label"),
-])
-
-# Apply schema to the DataFrame with tension_raw dropped
-unpacked_df_with_comments = spark.createDataFrame(
-    unpacked_df.drop("tension_raw").rdd,
-    schema=unpacked_schema
-)
-
+# Write the DataFrame (dropping tension_raw column)
 (
-    unpacked_df_with_comments.write
+    unpacked_df
+    .drop("tension_raw")
+    .write
     .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
-    .saveAsTable(FEATURES_TABLE)  
+    .saveAsTable(FEATURES_TABLE)
 )
+
+# Add UC column comments via ALTER TABLE (SC-compatible approach)
+column_comments = [
+    ("article_id", "Unique identifier from the source dataset"),
+    ("topic", "Newsgroup topic label (filtered to talk.religion.misc, rec.autos, sci.space)"),
+    ("subject", "Subject line of the original post"),
+    ("organization", "Organization header, self-reported by the poster"),
+    ("lines_header", "Original Lines: header value (not verified against actual line count)"),
+    ("distribution", "Distribution header, where present"),
+    ("text", "Article body: headers and footer stripped, person/email PII masked"),
+    ("char_count", "Character count of the cleaned body text"),
+    ("word_count", "Word count of the cleaned body text"),
+    ("summary", "LLM-generated summary of the article body (ai_summarize / ai_query, ~30 words)"),
+    ("embedding", "Raw embedding vector from the databricks-qwen3-embedding-0-6b endpoint, generated from the summary"),
+    ("features", "Embedding cast to MLlib Vector type, input to KMeans"),
+    ("normalized_features", "L2-normalized embedding vector; KMeans was fit on this column, not raw features"),
+    ("cluster", "KMeans cluster assignment (k=3, fit on normalized_features)"),
+    ("distance_to_centroid", "Euclidean distance from this point to its assigned cluster's centroid, in normalized_features space"),
+    ("tension_label", "LLM-classified tone of the post: escalating, de-escalating, or neutral"),
+    ("tension_reasoning", "One-sentence LLM justification for the tension_label"),
+]
+
+for col_name, comment in column_comments:
+    # Escape single quotes in comment for SQL
+    escaped_comment = comment.replace("'", "''")
+    spark.sql(f"ALTER TABLE {FEATURES_TABLE} ALTER COLUMN {col_name} COMMENT '{escaped_comment}'")
 
 # COMMAND ----------
 
@@ -1026,6 +1122,24 @@ display(unpacked_car_df.select("article_id", "makes_and_models", "features_and_p
 
 # COMMAND ----------
 
+# MAGIC %md
+# MAGIC **Interpreting the Correlation Heatmap**
+# MAGIC
+# MAGIC The correlation matrix above shows which car makes tend to be mentioned together in posts:
+# MAGIC
+# MAGIC * **Positive correlations** (red/warm colors) indicate makes that frequently appear together — e.g., posts comparing competing models
+# MAGIC * **Negative correlations** (blue/cool colors) suggest makes that rarely co-occur — different discussion contexts or audience segments  
+# MAGIC * **Near-zero correlations** (white) mean independent mentions — no particular relationship
+# MAGIC
+# MAGIC This analysis can reveal:
+# MAGIC * Natural competitor sets (Honda vs Toyota vs Nissan)
+# MAGIC * Discussion patterns (enthusiast brands vs mass-market)
+# MAGIC * Geographic or demographic segmentation in the data
+# MAGIC
+# MAGIC These co-occurrence patterns become features themselves and can inform recommendation systems, targeted content, or market segmentation models.
+
+# COMMAND ----------
+
 # DBTITLE 1,Examine extracted fields
 display(
     unpacked_car_df
@@ -1117,46 +1231,48 @@ plt.show()
 # COMMAND ----------
 
 # DBTITLE 1,Write table with metadata
-auto_post_features_schema = StructType([
-    field("article_id",          StringType(),               "Unique identifier from the source dataset"),
-    field("topic",                StringType(),               "Newsgroup topic label (filtered to rec.autos for this table)"),
-    field("subject",              StringType(),               "Subject line of the original post"),
-    field("organization",         StringType(),               "Organization header, self-reported by the poster"),
-    field("lines_header",         StringType(),               "Original Lines: header value (not verified against actual line count)"),
-    field("distribution",         StringType(),               "Distribution header, where present"),
-    field("text",                 StringType(),               "Article body: headers and footer stripped, person/email PII masked"),
-    field("char_count",           IntegerType(),              "Character count of the cleaned body text"),
-    field("word_count",           IntegerType(),              "Word count of the cleaned body text"),
-    field("summary",              StringType(),               "LLM-generated summary of the article body (ai_summarize / ai_query, ~30 words)"),
-    field("embedding",            ArrayType(FloatType()),     "Raw embedding vector from the databricks-bge-large-en endpoint, generated from the summary"),
-    field("features",             VectorUDT(),                "Embedding cast to MLlib Vector type, input to KMeans"),
-    field("normalized_features",  VectorUDT(),                "L2-normalized embedding vector; KMeans was fit on this column, not raw features"),
-    field("cluster",              IntegerType(),              "KMeans cluster assignment (k=3, fit on normalized_features across all three newsgroups)"),
-    field("distance_to_centroid", DoubleType(),                "Euclidean distance from this point to its assigned cluster's centroid, in normalized_features space"),
-    field("tension_label",        StringType(),               "LLM-classified tone of the post: escalating, de-escalating, or neutral"),
-    field("tension_reasoning",    StringType(),               "One-sentence LLM justification for the tension_label"),
-    field("make_list",            ArrayType(StringType()),   "LLM-extracted, LLM-normalized list of distinct car makes/models mentioned in the post (raw extraction canonicalized via a separate ai_query mapping pass)"),
-    field("make_count",           IntegerType(),              "Count of distinct entries in make_list"),
-    field("mentions_ford",        BooleanType(),              "True if make_list contains a Ford make or model"),
-    field("mentions_toyota",      BooleanType(),              "True if make_list contains a Toyota make or model"),
-    field("mentions_honda",       BooleanType(),              "True if make_list contains a Honda make or model"),
-    field("mentions_chevrolet",   BooleanType(),              "True if make_list contains a Chevrolet make or model"),
-    field("mentions_nissan",      BooleanType(),              "True if make_list contains a Nissan make or model"),
-    field("mentions_vw",          BooleanType(),              "True if make_list contains a Volkswagen make or model"),
-])
-
-auto_post_features_df_with_comments = spark.createDataFrame(
-    auto_post_features.rdd,  # your final DataFrame before this write
-    schema=auto_post_features_schema
-)
-
+# Write the DataFrame directly (SC-compatible approach)
 (
-    auto_post_features_df_with_comments.write
+    auto_post_features.write
     .format("delta")
     .mode("overwrite")
     .option("overwriteSchema", "true")
     .saveAsTable(AUTO_POST_FEATURES_TABLE)
 )
+
+# Add UC column comments via ALTER TABLE (SC-compatible approach)
+column_comments = [
+    ("article_id", "Unique identifier from the source dataset"),
+    ("topic", "Newsgroup topic label (filtered to rec.autos for this table)"),
+    ("subject", "Subject line of the original post"),
+    ("organization", "Organization header, self-reported by the poster"),
+    ("lines_header", "Original Lines: header value (not verified against actual line count)"),
+    ("distribution", "Distribution header, where present"),
+    ("text", "Article body: headers and footer stripped, person/email PII masked"),
+    ("char_count", "Character count of the cleaned body text"),
+    ("word_count", "Word count of the cleaned body text"),
+    ("summary", "LLM-generated summary of the article body (ai_summarize / ai_query, ~30 words)"),
+    ("embedding", "Raw embedding vector from the databricks-bge-large-en endpoint, generated from the summary"),
+    ("features", "Embedding cast to MLlib Vector type, input to KMeans"),
+    ("normalized_features", "L2-normalized embedding vector; KMeans was fit on this column, not raw features"),
+    ("cluster", "KMeans cluster assignment (k=3, fit on normalized_features across all three newsgroups)"),
+    ("distance_to_centroid", "Euclidean distance from this point to its assigned cluster's centroid, in normalized_features space"),
+    ("tension_label", "LLM-classified tone of the post: escalating, de-escalating, or neutral"),
+    ("tension_reasoning", "One-sentence LLM justification for the tension_label"),
+    ("make_list", "LLM-extracted, LLM-normalized list of distinct car makes/models mentioned in the post (raw extraction canonicalized via a separate ai_query mapping pass)"),
+    ("make_count", "Count of distinct entries in make_list"),
+    ("mentions_ford", "True if make_list contains a Ford make or model"),
+    ("mentions_toyota", "True if make_list contains a Toyota make or model"),
+    ("mentions_honda", "True if make_list contains a Honda make or model"),
+    ("mentions_chevrolet", "True if make_list contains a Chevrolet make or model"),
+    ("mentions_nissan", "True if make_list contains a Nissan make or model"),
+    ("mentions_vw", "True if make_list contains a Volkswagen make or model"),
+]
+
+for col_name, comment in column_comments:
+    # Escape single quotes in comment for SQL
+    escaped_comment = comment.replace("'", "''")
+    spark.sql(f"ALTER TABLE {AUTO_POST_FEATURES_TABLE} ALTER COLUMN {col_name} COMMENT '{escaped_comment}'")
 
 spark.sql(f"""
     COMMENT ON TABLE {AUTO_POST_FEATURES_TABLE} IS
@@ -1173,7 +1289,54 @@ spark.sql(f"""
 
 # COMMAND ----------
 
+# DBTITLE 1,View the final feature table
+# MAGIC %sql
+# MAGIC -- Query the final rec.autos feature table with all extracted fields
+# MAGIC SELECT 
+# MAGIC   article_id,
+# MAGIC   subject,
+# MAGIC   summary,
+# MAGIC   cluster,
+# MAGIC   tension_label,
+# MAGIC   make_list,
+# MAGIC   make_count,
+# MAGIC   mentions_ford,
+# MAGIC   mentions_toyota,
+# MAGIC   mentions_honda
+# MAGIC FROM hackathon.default.tutorial_sci_med_auto_post_features_tutorial
+# MAGIC LIMIT 10
+
+# COMMAND ----------
+
 # MAGIC %md
+# MAGIC ## Summary: What We've Built
+# MAGIC
+# MAGIC This tutorial demonstrated a complete pipeline for engineering semantic features from unstructured text, grounded in the UK Government AI Principles:
+# MAGIC
+# MAGIC **Stage 1 — Ingest & Protection (P2, P4, P7, P10)**
+# MAGIC * Loaded and cleaned raw newsgroup data
+# MAGIC * Redacted PII using `ai_mask` + regex hybrid approach
+# MAGIC * Persisted to Unity Catalog with full metadata and provenance
+# MAGIC
+# MAGIC **Stage 2 — Feature Engineering (P1, P6, P9)**
+# MAGIC * Summarization with `ai_summarize` to distill core meaning
+# MAGIC * Text embeddings for semantic similarity measurement
+# MAGIC * Unsupervised clustering to discover thematic groups
+# MAGIC * Structured extraction with `ai_query` (tension classification, entity extraction)
+# MAGIC * Hybrid deterministic+LLM approach for car make/model detection
+# MAGIC
+# MAGIC **Key Takeaways:**
+# MAGIC * **Validate, don't trust** — LLMs are powerful but fallible; always test and monitor
+# MAGIC * **Use the right tool** — combine deterministic methods (regex, gazetteers) with LLMs
+# MAGIC * **Build human review in** — domain experts must validate semantic features before use
+# MAGIC * **Monitor continuously** — track costs, quality, and drift over time
+# MAGIC
 # MAGIC ## Now it is your turn!
 # MAGIC
-# MAGIC We have gone over just a few ways to create semantic features from free text data, and thought about how to embed the government AI principles in the workflows to define them.  I am sure you can find others.  We look forward to seeing what you do!
+# MAGIC You've seen how to create semantic features from free text. The datasets provided for the hackathon offer many opportunities to apply these techniques:
+# MAGIC * Extract entities from CQC inspection reports
+# MAGIC * Classify sentiment in citizen feedback
+# MAGIC * Cluster similar policy documents
+# MAGIC * Detect themes in consultation responses
+# MAGIC
+# MAGIC We look forward to seeing what you build!
